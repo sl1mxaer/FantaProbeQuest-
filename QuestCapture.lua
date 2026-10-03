@@ -5,13 +5,26 @@ local pendingQuestLoads = {}
 local seenQuestIDs = {}
 local lastJournalState = {}
 local lastLineSignatures = {}
+local lastAvailableLinesSignature
 local currentInteractionQuestID
 local initialSnapshotRecorded = false
 local lastGossipSignature
 local lastGossipTime = 0
+local lastTurnIn
 
 local function safeScalar(value)
     return addon.SafeScalar(value)
+end
+
+local function nowElapsed()
+    if type(GetTime) == "function" then
+        local ok, value = pcall(GetTime)
+        if ok and addon.CanAccessValue(value) and type(value) == "number" then
+            return value
+        end
+    end
+
+    return 0
 end
 
 local function getNPC()
@@ -36,6 +49,22 @@ local function getNPC()
     end
 
     return npc
+end
+
+local function sameNPC(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then
+        return false
+    end
+
+    if a.guid and b.guid then
+        return a.guid == b.guid
+    end
+
+    if a.name and b.name then
+        return a.name == b.name
+    end
+
+    return false
 end
 
 local function requestQuestTitle(questID)
@@ -118,34 +147,6 @@ local function getQuestInfoFromLog(questID)
     end
 
     return copyQuestInfo(info)
-end
-
-local function getObjectives(questID)
-    if not C_QuestLog or type(C_QuestLog.GetQuestObjectives) ~= "function" then
-        return nil
-    end
-
-    local ok, objectives = pcall(C_QuestLog.GetQuestObjectives, questID)
-    if not ok or type(objectives) ~= "table" or not addon.CanAccessTable(objectives) then
-        return nil
-    end
-
-    local result = {}
-    for index, objective in ipairs(objectives) do
-        if type(objective) == "table" and addon.CanAccessTable(objective) then
-            result[#result + 1] = {
-                index = index,
-                text = safeScalar(objective.text),
-                type = safeScalar(objective.type),
-                finished = safeScalar(objective.finished),
-                numFulfilled = safeScalar(objective.numFulfilled),
-                numRequired = safeScalar(objective.numRequired),
-                objectiveType = safeScalar(objective.objectiveType),
-            }
-        end
-    end
-
-    return result
 end
 
 local function copyQuestLineInfo(info)
@@ -270,7 +271,7 @@ local function getQuestDifficultyLevel(questID)
     return nil
 end
 
-local function buildQuestSnapshot(questID, includeObjectives)
+local function buildQuestSnapshot(questID)
     if type(questID) ~= "number" then
         return nil
     end
@@ -291,10 +292,6 @@ local function buildQuestSnapshot(questID, includeObjectives)
 
     if C_QuestLog and type(C_QuestLog.IsComplete) == "function" then
         snapshot.readyToTurnIn = safeQuestBool(C_QuestLog.IsComplete, questID)
-    end
-
-    if includeObjectives and inLog then
-        snapshot.objectives = getObjectives(questID)
     end
 
     return snapshot
@@ -341,13 +338,17 @@ local function buildJournalSnapshot()
 
     local quests = {}
     for _, questID in ipairs(questIDs) do
-        quests[#quests + 1] = buildQuestSnapshot(questID, true)
+        quests[#quests + 1] = buildQuestSnapshot(questID)
     end
 
     return quests
 end
 
 local function recordJournalDiff(reason)
+    if not initialSnapshotRecorded then
+        return
+    end
+
     local current = getCurrentJournalState()
     local added = {}
     local removed = {}
@@ -356,12 +357,13 @@ local function recordJournalDiff(reason)
     for questID, info in pairs(current) do
         local previous = lastJournalState[questID]
         if not previous then
-            added[#added + 1] = buildQuestSnapshot(questID, true)
+            added[#added + 1] = buildQuestSnapshot(questID)
         elseif previous.readyToTurnIn ~= info.readyToTurnIn then
             completionChanged[#completionChanged + 1] = {
                 before = previous.readyToTurnIn,
                 after = info.readyToTurnIn,
-                quest = buildQuestSnapshot(questID, true),
+                questID = questID,
+                title = info.title,
             }
         end
     end
@@ -403,15 +405,14 @@ local function lineSignature(line)
 
     local parts = {
         tostring(line.questLineID or ""),
-        tostring(line.questLineName or ""),
         tostring(line.selectedSource or ""),
+        tostring(line.lineComplete),
     }
 
     if type(line.members) == "table" then
         for _, member in ipairs(line.members) do
             parts[#parts + 1] = table.concat({
                 tostring(member.questID or ""),
-                tostring(member.title or ""),
                 tostring(member.inLog),
                 tostring(member.completed),
                 tostring(member.completedOnAccount),
@@ -444,11 +445,83 @@ local function captureKnownQuestLineChanges(reason)
     end
 end
 
+local function availableLinesSignature(lines, forceVisible)
+    local parts = {}
+
+    for _, info in ipairs(lines) do
+        parts[#parts + 1] = table.concat({
+            tostring(info.questID or ""),
+            tostring(info.questLineID or ""),
+            tostring(info.inProgress),
+            tostring(info.isQuestStart),
+            tostring(info.isHidden),
+        }, ":")
+    end
+
+    parts[#parts + 1] = "force"
+
+    for _, questID in ipairs(forceVisible) do
+        parts[#parts + 1] = tostring(questID)
+    end
+
+    return table.concat(parts, "|")
+end
+
+local function captureAvailableQuestLines(reason)
+    local mapID = addon.GetCurrentMapID()
+    if not mapID or not C_QuestLine then
+        return
+    end
+
+    local lines = {}
+    local forceVisible = {}
+
+    if type(C_QuestLine.GetAvailableQuestLines) == "function" then
+        local ok, values = pcall(C_QuestLine.GetAvailableQuestLines, mapID)
+        if ok and type(values) == "table" and addon.CanAccessTable(values) then
+            for _, info in ipairs(values) do
+                local copied = copyQuestLineInfo(info)
+                if copied then
+                    lines[#lines + 1] = copied
+                    if type(copied.questID) == "number" then
+                        seenQuestIDs[copied.questID] = true
+                    end
+                end
+            end
+        end
+    end
+
+    if type(C_QuestLine.GetForceVisibleQuests) == "function" then
+        local ok, values = pcall(C_QuestLine.GetForceVisibleQuests, mapID)
+        if ok and type(values) == "table" and addon.CanAccessTable(values) then
+            for _, questID in ipairs(values) do
+                if addon.CanAccessValue(questID) and type(questID) == "number" then
+                    forceVisible[#forceVisible + 1] = questID
+                    seenQuestIDs[questID] = true
+                end
+            end
+        end
+    end
+
+    local signature = availableLinesSignature(lines, forceVisible)
+    if signature == lastAvailableLinesSignature then
+        return
+    end
+
+    lastAvailableLinesSignature = signature
+    addon.AppendEvent("AVAILABLE_QUEST_LINES", {
+        reason = reason,
+        mapID = mapID,
+        lines = lines,
+        forceVisibleQuestIDs = forceVisible,
+    })
+end
+
 local function recordQuestEvent(eventName, questID, extra)
     local payload = extra or {}
 
     if type(questID) == "number" then
-        payload.quest = buildQuestSnapshot(questID, true)
+        payload.quest = buildQuestSnapshot(questID)
     else
         payload.questID = questID
     end
@@ -479,7 +552,7 @@ local function normalizeGossipQuest(info)
     }
 
     if type(questID) == "number" then
-        result.quest = buildQuestSnapshot(questID, false)
+        result.quest = buildQuestSnapshot(questID)
     end
 
     return result
@@ -532,7 +605,7 @@ local function captureGossip()
     local npc = getNPC()
     signatureParts[#signatureParts + 1] = npc and tostring(npc.guid or npc.name or "") or ""
     local signature = table.concat(signatureParts, "|")
-    local now = type(GetTime) == "function" and GetTime() or 0
+    local now = nowElapsed()
 
     if signature == lastGossipSignature and (now - lastGossipTime) < 2 then
         return
@@ -580,7 +653,7 @@ local function captureLegacyGreeting()
                 }
 
                 if type(questID) == "number" then
-                    record.quest = buildQuestSnapshot(questID, false)
+                    record.quest = buildQuestSnapshot(questID)
                 end
 
                 available[#available + 1] = record
@@ -619,7 +692,7 @@ local function captureLegacyGreeting()
                 }
 
                 if type(questID) == "number" then
-                    record.quest = buildQuestSnapshot(questID, false)
+                    record.quest = buildQuestSnapshot(questID)
                 end
 
                 active[#active + 1] = record
@@ -646,6 +719,10 @@ local function getCurrentInteractionQuestID()
 end
 
 local function scheduleJournalDiff(reason)
+    if not initialSnapshotRecorded then
+        return
+    end
+
     if C_Timer and type(C_Timer.After) == "function" then
         C_Timer.After(0, function()
             recordJournalDiff(reason)
@@ -660,14 +737,16 @@ local function recordInitialSnapshot()
         return
     end
 
-    initialSnapshotRecorded = true
     requestQuestLinesForCurrentMap()
 
+    local journal = buildJournalSnapshot()
+    lastJournalState = getCurrentJournalState()
+    initialSnapshotRecorded = true
+
     addon.AppendEvent("SESSION_START", {
-        journal = buildJournalSnapshot(),
+        journal = journal,
     })
 
-    lastJournalState = getCurrentJournalState()
     captureKnownQuestLineChanges("SESSION_START")
 end
 
@@ -681,7 +760,35 @@ local function onQuestLineUpdate(requestRequired)
         return
     end
 
+    captureAvailableQuestLines("QUESTLINE_UPDATE")
     captureKnownQuestLineChanges("QUESTLINE_UPDATE")
+end
+
+local function maybeRecordFollowupCandidate(questID, npc)
+    if type(questID) ~= "number" or not lastTurnIn then
+        return
+    end
+
+    local age = nowElapsed() - (lastTurnIn.elapsed or 0)
+    if age < 0 or age > 15 then
+        lastTurnIn = nil
+        return
+    end
+
+    if questID == lastTurnIn.questID or not sameNPC(lastTurnIn.npc, npc) then
+        return
+    end
+
+    addon.AppendEvent("FOLLOWUP_CANDIDATE", {
+        fromQuestID = lastTurnIn.questID,
+        fromTitle = lastTurnIn.title,
+        toQuestID = questID,
+        toTitle = requestQuestTitle(questID),
+        npc = npc,
+        secondsAfterTurnIn = age,
+    })
+
+    lastTurnIn = nil
 end
 
 local function onEvent(self, event, ...)
@@ -697,9 +804,30 @@ local function onEvent(self, event, ...)
     end
 
     if event == "PLAYER_LOGOUT" then
+        local activeQuestIDs = {}
+        for questID in pairs(lastJournalState) do
+            activeQuestIDs[#activeQuestIDs + 1] = questID
+        end
+        table.sort(activeQuestIDs)
+
         addon.AppendEvent("SESSION_END", {
-            journal = buildJournalSnapshot(),
+            activeQuestIDs = activeQuestIDs,
         })
+        return
+    end
+
+    if event == "PLAYER_LEVEL_UP" then
+        local newLevel = ...
+        addon.AppendEvent("PLAYER_LEVEL_UP", {
+            newLevel = safeScalar(newLevel),
+        })
+        return
+    end
+
+    if event == "ZONE_CHANGED_NEW_AREA" then
+        lastAvailableLinesSignature = nil
+        addon.AppendEvent("MAP_CONTEXT", {})
+        requestQuestLinesForCurrentMap()
         return
     end
 
@@ -728,8 +856,12 @@ local function onEvent(self, event, ...)
             end
         end
 
+        local npc = getNPC()
+        maybeRecordFollowupCandidate(questID, npc)
+
         recordQuestEvent("QUEST_DETAIL", questID, {
             displayedTitle = title,
+            npc = npc,
         })
         return
     end
@@ -775,9 +907,20 @@ local function onEvent(self, event, ...)
 
     if event == "QUEST_TURNED_IN" then
         local questID, xpReward, moneyReward = ...
+        local npc = getNPC()
+        local title = requestQuestTitle(questID)
+
+        lastTurnIn = {
+            questID = questID,
+            title = title,
+            npc = npc,
+            elapsed = nowElapsed(),
+        }
+
         recordQuestEvent("QUEST_TURNED_IN", questID, {
             xpReward = safeScalar(xpReward),
             moneyReward = safeScalar(moneyReward),
+            npc = npc,
         })
         scheduleJournalDiff("QUEST_TURNED_IN")
         return
@@ -801,7 +944,6 @@ local function onEvent(self, event, ...)
                 success = safeScalar(success),
                 title = requestQuestTitle(questID),
             })
-            captureKnownQuestLineChanges("QUEST_DATA_LOAD_RESULT")
         end
         return
     end
@@ -822,6 +964,8 @@ function addon.InitializeQuestCapture()
     local events = {
         "PLAYER_ENTERING_WORLD",
         "PLAYER_LOGOUT",
+        "PLAYER_LEVEL_UP",
+        "ZONE_CHANGED_NEW_AREA",
         "GOSSIP_SHOW",
         "QUEST_GREETING",
         "QUEST_DETAIL",
