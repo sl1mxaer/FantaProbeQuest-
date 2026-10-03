@@ -1,0 +1,9 @@
+## Interface: 16001
+## Title: FantaProbeQuest
+## Notes: Silent quest and quest-line research logger for WoW Forever
+## Author: Artem
+## Version: 0.1.0
+## SavedVariables: FantaProbeQuestDB
+
+Core.lua
+QuestCapture.lua
