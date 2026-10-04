@@ -1,7 +1,7 @@
 local addonName, addon = ...
 
 addon.name = addonName
-addon.version = "0.2.0"
+addon.version = "0.2.1"
 addon.schemaVersion = 1
 
 local function canAccessValue(value)
