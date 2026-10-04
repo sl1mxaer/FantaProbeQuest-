@@ -50,12 +50,12 @@ The first live capture on Forever `1.60.1.70205` showed that native `C_QuestLine
 - a newer Forever quest returned a populated quest line with multiple members;
 - the returned member list can include duplicate-title/alternate entries and non-monotonic completion state, so its array position must not automatically be treated as a simple story step.
 
-Version `0.2.0` reduces duplicate logging and adds explicit observational follow-up detection for old quests that are not covered by `C_QuestLine`.
+Version `0.2.0` reduced duplicate logging and added observational follow-up detection for old quests that are not covered by `C_QuestLine`. Version `0.2.1` extends the follow-up observation window and keeps multiple same-NPC candidates, because live testing showed that reading/pausing for more than 15 seconds could hide a real transition.
 
 ## Current target
 
 - World of Warcraft: Forever
 - Interface: `16001`
-- Research build: `0.2.0`
+- Research build: `0.2.1`
 
 See `docs/RESEARCH_PLAN.md` for the current test plan.
