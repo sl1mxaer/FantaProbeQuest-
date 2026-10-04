@@ -2,7 +2,7 @@
 ## Title: FantaProbeQuest
 ## Notes: Silent quest and quest-line research logger for WoW Forever
 ## Author: Artem
-## Version: 0.2.0
+## Version: 0.2.1
 ## SavedVariables: FantaProbeQuestDB
 
 Core.lua
