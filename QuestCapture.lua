@@ -770,7 +770,7 @@ local function maybeRecordFollowupCandidate(questID, npc)
     end
 
     local age = nowElapsed() - (lastTurnIn.elapsed or 0)
-    if age < 0 or age > 15 then
+    if age < 0 or age > 120 then
         lastTurnIn = nil
         return
     end
@@ -778,6 +778,13 @@ local function maybeRecordFollowupCandidate(questID, npc)
     if questID == lastTurnIn.questID or not sameNPC(lastTurnIn.npc, npc) then
         return
     end
+
+    lastTurnIn.candidates = lastTurnIn.candidates or {}
+    if lastTurnIn.candidates[questID] then
+        return
+    end
+
+    lastTurnIn.candidates[questID] = true
 
     addon.AppendEvent("FOLLOWUP_CANDIDATE", {
         fromQuestID = lastTurnIn.questID,
@@ -787,8 +794,6 @@ local function maybeRecordFollowupCandidate(questID, npc)
         npc = npc,
         secondsAfterTurnIn = age,
     })
-
-    lastTurnIn = nil
 end
 
 local function onEvent(self, event, ...)
